@@ -1,11 +1,13 @@
 import { PDFDocument, StandardFonts, rgb, PDFFont, PDFPage } from 'pdf-lib';
-import { Employee } from './types';
+import { Employee, ContractTemplate } from './types';
 import { format, parseISO } from 'date-fns';
 import { id } from 'date-fns/locale';
+import { replacePlaceholders } from './variable-replacer';
 
 // F4 paper size in points (1 point = 1/72 inch)
 // 215mm x 330mm = 8.46 x 12.99 inches
 const F4_SIZE: [number, number] = [610, 936];
+const MARGIN = 50;
 
 interface TextOptions {
   font: PDFFont;
@@ -15,23 +17,47 @@ interface TextOptions {
   maxWidth?: number;
 }
 
-// Advanced function to draw justified text
+interface PdfGeneratorState {
+  pdfDoc: PDFDocument;
+  currentPage: PDFPage;
+  currentY: number;
+  timesRomanFont: PDFFont;
+  timesRomanBoldFont: PDFFont;
+  pageWidth: number;
+  pageHeight: number;
+}
+
+// Helper to add a new page and reset Y position
+function addNewPage(state: PdfGeneratorState): void {
+  state.currentPage = state.pdfDoc.addPage(F4_SIZE);
+  state.currentY = state.pageHeight - MARGIN;
+}
+
+// Helper to check if a new page is needed before drawing content
+function checkPageBreak(state: PdfGeneratorState, requiredHeight: number): void {
+  if (state.currentY - requiredHeight < MARGIN) {
+    addNewPage(state);
+  }
+}
+
+// Advanced function to draw justified text that handles page breaks
 async function drawJustifiedText(
-  page: PDFPage,
+  state: PdfGeneratorState,
   text: string,
-  x: number,
-  y: number,
   options: TextOptions
 ) {
   const { font, fontSize, color = rgb(0, 0, 0), maxWidth } = options;
   if (!maxWidth) throw new Error('maxWidth is required for justified text.');
 
   const paragraphs = text.split('\n');
-  let currentY = y;
 
   for (const paragraph of paragraphs) {
     const words = paragraph.split(' ');
     let line = '';
+
+    // Check if whole paragraph needs a new page. A bit naive but prevents awkward single-line splits.
+    const estimatedParaHeight = Math.ceil(font.widthOfTextAtSize(paragraph, fontSize) / maxWidth) * options.lineHeight;
+    checkPageBreak(state, estimatedParaHeight);
 
     for (let i = 0; i < words.length; i++) {
       const word = words[i];
@@ -39,6 +65,8 @@ async function drawJustifiedText(
       const lineWidth = font.widthOfTextAtSize(testLine, fontSize);
 
       if (lineWidth > maxWidth && line) {
+        checkPageBreak(state, options.lineHeight); // Check before drawing a line
+
         const wordsInLine = line.split(' ');
         const isLastLineOfParagraph = i === words.length;
 
@@ -46,143 +74,149 @@ async function drawJustifiedText(
           const textWidth = font.widthOfTextAtSize(line.replace(/\s/g, ''), fontSize);
           const totalSpacing = maxWidth - textWidth;
           const spaceWidth = totalSpacing / (wordsInLine.length - 1);
-          let currentX = x;
+          let currentX = MARGIN;
           for (const w of wordsInLine) {
-            page.drawText(w, { x: currentX, y: currentY, font, size: fontSize, color });
+            state.currentPage.drawText(w, { x: currentX, y: state.currentY, font, size: fontSize, color });
             currentX += font.widthOfTextAtSize(w, fontSize) + spaceWidth;
           }
         } else {
-           // Left-align the line if it has only one word or is the last line
-           page.drawText(line, { x, y: currentY, font, size: fontSize, color });
+           state.currentPage.drawText(line, { x: MARGIN, y: state.currentY, font, size: fontSize, color });
         }
-        currentY -= options.lineHeight;
+        state.currentY -= options.lineHeight;
         line = word;
       } else {
         line = testLine;
       }
     }
     // Draw the last line of the paragraph (left-aligned)
-    page.drawText(line, { x, y: currentY, font, size: fontSize, color });
-    currentY -= options.lineHeight;
+    checkPageBreak(state, options.lineHeight);
+    state.currentPage.drawText(line, { x: MARGIN, y: state.currentY, font, size: fontSize, color });
+    state.currentY -= options.lineHeight;
   }
-  return currentY; // Return the new Y position
 }
 
 
-export async function generateContractPdf(employee: Employee, startDate: Date, endDate: Date): Promise<Uint8Array> {
+export async function generateContractPdf(
+    employee: Employee, 
+    template: ContractTemplate,
+    startDate: Date, 
+    endDate: Date
+): Promise<Uint8Array> {
   const pdfDoc = await PDFDocument.create();
   const page = pdfDoc.addPage(F4_SIZE);
   const { width, height } = page.getSize();
 
-  // Embed fonts
-  const timesRomanFont = await pdfDoc.embedFont(StandardFonts.TimesRoman);
-  const timesRomanBoldFont = await pdfDoc.embedFont(StandardFonts.TimesRomanBold);
+  const state: PdfGeneratorState = {
+    pdfDoc,
+    currentPage: page,
+    currentY: height - MARGIN,
+    timesRomanFont: await pdfDoc.embedFont(StandardFonts.TimesRoman),
+    timesRomanBoldFont: await pdfDoc.embedFont(StandardFonts.TimesRomanBold),
+    pageWidth: width,
+    pageHeight: height,
+  };
 
-  const margin = 50;
-  
+  const dates = { startDate, endDate };
+
   // --- HEADER ---
-  const headerText = 'PERJANJIAN KERJA';
-  const headerTextWidth = timesRomanBoldFont.widthOfTextAtSize(headerText, 14);
-  page.drawText(headerText, {
+  const headerText = replacePlaceholders(template.headerTitle, employee, dates);
+  const headerTextWidth = state.timesRomanBoldFont.widthOfTextAtSize(headerText, 14);
+  checkPageBreak(state, 50);
+  state.currentPage.drawText(headerText, {
     x: (width - headerTextWidth) / 2,
-    y: height - margin,
-    font: timesRomanBoldFont,
+    y: state.currentY,
+    font: state.timesRomanBoldFont,
     size: 14,
   });
+  state.currentY -= 20;
 
-  const subHeaderText = `Nomor: ${employee.contractNumber}`;
-  const subHeaderTextWidth = timesRomanFont.widthOfTextAtSize(subHeaderText, 12);
-  page.drawText(subHeaderText, {
+  const subHeaderText = replacePlaceholders(`Nomor: ${employee.contractNumber}`, employee, dates);
+  const subHeaderTextWidth = state.timesRomanFont.widthOfTextAtSize(subHeaderText, 12);
+  state.currentPage.drawText(subHeaderText, {
     x: (width - subHeaderTextWidth) / 2,
-    y: height - margin - 20,
-    font: timesRomanFont,
+    y: state.currentY,
+    font: state.timesRomanFont,
     size: 12,
   });
+  state.currentY -= 10;
   
-  // Draw a line separator
-  page.drawLine({
-    start: { x: margin, y: height - margin - 30 },
-    end: { x: width - margin, y: height - margin - 30 },
+  state.currentPage.drawLine({
+    start: { x: MARGIN, y: state.currentY },
+    end: { x: width - MARGIN, y: state.currentY },
     thickness: 1.5,
-  })
+  });
+  state.currentY -= 30;
 
-
-  let currentY = height - margin - 60;
-  
   // --- Opening statement ---
-  const openingText = `Pada hari ini, ${format(startDate, "eeee, dd MMMM yyyy", { locale: id })}, yang bertanda tangan di bawah ini:`;
-  currentY = await drawJustifiedText(page, openingText, margin, currentY, {
-    font: timesRomanFont,
-    fontSize: 12,
-    lineHeight: 18,
-    maxWidth: width - margin * 2,
-  });
-  currentY -= 20;
+  if (template.openingText) {
+    const openingText = replacePlaceholders(template.openingText, employee, dates);
+    await drawJustifiedText(state, openingText, {
+        font: state.timesRomanFont,
+        fontSize: 12,
+        lineHeight: 18,
+        maxWidth: width - MARGIN * 2,
+    });
+    state.currentY -= 20;
+  }
 
-  // --- Parties Involved (PIHAK KESATU & PIHAK KEDUA) ---
-  // This section would have details of the employer and employee
-  // Placeholder for brevity
-  const pihakPertama = `I. Nama Instansi\nJabatan\nAlamat\n\nDalam hal ini bertindak untuk dan atas nama Pemerintah Kabupaten, selanjutnya disebut PIHAK PERTAMA.`;
-  page.drawText(pihakPertama, { x: margin, y: currentY, font: timesRomanFont, size: 12, lineHeight: 15});
-  currentY -= 100;
+  // --- ARTICLES ---
+  for (const article of template.articles) {
+    checkPageBreak(state, 60); // Estimate space for title + subtitle + some content
 
-  const pihakKedua = `II. Nama: ${employee.fullName}\nNI PPPK: ${employee.niPppk}\nTempat, Tanggal Lahir: ${employee.birthPlace}, ${format(parseISO(employee.birthDate), "dd MMMM yyyy", {locale: id})}\nAlamat: ${employee.address}\n\nDalam hal ini bertindak untuk dan atas nama diri sendiri, selanjutnya disebut PIHAK KEDUA.`;
-  page.drawText(pihakKedua, { x: margin, y: currentY, font: timesRomanFont, size: 12, lineHeight: 15});
-  currentY -= 150;
+    const articleTitle = replacePlaceholders(article.title, employee, dates);
+    const titleWidth = state.timesRomanBoldFont.widthOfTextAtSize(articleTitle, 12);
+    state.currentPage.drawText(articleTitle, {
+        x: (width - titleWidth) / 2,
+        y: state.currentY,
+        font: state.timesRomanBoldFont,
+        size: 12,
+    });
+    state.currentY -= 18;
 
-  // --- PASAL 1 (MASA PERJANJIAN KERJA) ---
-  page.drawText('PASAL 1', {
-    x: (width - timesRomanBoldFont.widthOfTextAtSize('PASAL 1', 14))/2,
-    y: currentY,
-    font: timesRomanBoldFont,
-    size: 14,
-  });
-  currentY -= 20;
+    const articleSubtitle = replacePlaceholders(article.subtitle, employee, dates);
+    const subtitleWidth = state.timesRomanBoldFont.widthOfTextAtSize(articleSubtitle, 12);
+     state.currentPage.drawText(articleSubtitle, {
+        x: (width - subtitleWidth) / 2,
+        y: state.currentY,
+        font: state.timesRomanBoldFont,
+        size: 12,
+    });
+    state.currentY -= 25;
+
+    const articleContent = replacePlaceholders(article.content, employee, dates);
+    await drawJustifiedText(state, articleContent, {
+        font: state.timesRomanFont,
+        fontSize: 12,
+        lineHeight: 18,
+        maxWidth: width - MARGIN * 2,
+    });
+    state.currentY -= 20; // Space after article
+  }
+
+  // --- Closing Text ---
+  if (template.closingText) {
+    const closingText = replacePlaceholders(template.closingText, employee, dates);
+     await drawJustifiedText(state, closingText, {
+        font: state.timesRomanFont,
+        fontSize: 12,
+        lineHeight: 18,
+        maxWidth: width - MARGIN * 2,
+    });
+    state.currentY -= 20;
+  }
   
-  const pasal1Text = `Masa Perjanjian Kerja adalah selama ${employee.contractType === 'PENUH_WAKTU' ? '5 (lima)' : '1 (satu)'} tahun, terhitung mulai tanggal ${format(startDate, 'dd MMMM yyyy', {locale:id})} sampai dengan tanggal ${format(endDate, 'dd MMMM yyyy', {locale:id})}.`;
-  currentY = await drawJustifiedText(page, pasal1Text, margin, currentY, {
-    font: timesRomanFont,
-    fontSize: 12,
-    lineHeight: 18,
-    maxWidth: width - margin * 2
-  });
-  currentY -= 20;
-
-
-  // --- PASAL 6 (GAJI) ---
-  page.drawText('PASAL 6', {
-    x: (width - timesRomanBoldFont.widthOfTextAtSize('PASAL 6', 14))/2,
-    y: currentY,
-    font: timesRomanBoldFont,
-    size: 14,
-  });
-  currentY -= 20;
-
-  const pasal6Text = `PIHAK KEDUA berhak atas gaji sebesar Rp. ${employee.salaryNumeric.toLocaleString('id-ID')},- (${employee.salaryWords}) per bulan.`;
-  currentY = await drawJustifiedText(page, pasal6Text, margin, currentY, {
-    font: timesRomanFont,
-    fontSize: 12,
-    lineHeight: 18,
-    maxWidth: width - margin * 2
-  });
-  currentY -= 20;
-
-  // ... other "Pasal" would be rendered here ...
-
-
   // --- Placeholder for Signature Page ---
-  // The actual signature page is merged later, so we just add a placeholder page.
   const lastPage = pdfDoc.addPage(F4_SIZE);
   lastPage.drawText('Halaman Tanda Tangan', {
-      x: margin,
-      y: height - margin,
-      font: timesRomanBoldFont,
+      x: MARGIN,
+      y: height - MARGIN,
+      font: state.timesRomanBoldFont,
       size: 16
   });
   lastPage.drawText('[Placeholder - Halaman ini akan diganti dengan TTD basah]', {
-      x: margin,
+      x: MARGIN,
       y: height / 2,
-      font: timesRomanFont,
+      font: state.timesRomanFont,
       size: 12
   });
 
@@ -193,24 +227,13 @@ export async function mergePdfWithSignature(
   mainPdfBytes: Uint8Array,
   signaturePdfBytes: Uint8Array
 ): Promise<Uint8Array> {
-  // Load the main contract document
   const mainDoc = await PDFDocument.load(mainPdfBytes);
-
-  // Load the signature document
   const signatureDoc = await PDFDocument.load(signaturePdfBytes);
-  
-  // Get the first page of the signature PDF
   const [signaturePage] = await mainDoc.copyPages(signatureDoc, [0]);
-
-  // Remove the last page (placeholder) from the main document
   const pageCount = mainDoc.getPageCount();
   if (pageCount > 0) {
     mainDoc.removePage(pageCount - 1);
   }
-
-  // Add the signature page to the main document
   mainDoc.addPage(signaturePage);
-
-  // Save the merged document
   return mainDoc.save();
 }

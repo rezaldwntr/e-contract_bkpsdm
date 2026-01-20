@@ -1,17 +1,18 @@
 'use client';
 
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
-import { format, parseISO } from 'date-fns';
-import { CalendarIcon, UploadCloud, Loader2 } from 'lucide-react';
+import { format } from 'date-fns';
+import { CalendarIcon, UploadCloud, Loader2, FileText } from 'lucide-react';
 import { archiveAndValidateContract } from '@/ai/flows/archive-and-validate-contract';
 
-import { Employee } from '@/lib/types';
+import { Employee, ContractTemplate } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useContractCalculator } from '@/hooks/use-contract-calculator';
 import { generateContractPdf, mergePdfWithSignature } from '@/lib/pdf-utils';
+import { FirebaseFirestore } from '@/services/firebase';
 
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
@@ -19,6 +20,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 
 interface ArchiveDialogProps {
@@ -32,15 +34,17 @@ const archiveSchema = z.object({
   startDate: z.date({
     required_error: 'A start date is required.',
   }),
+  templateId: z.string().min(1, 'A contract template is required.'),
   signatureFile: z
     .custom<FileList>()
     .refine((files) => files?.length === 1, 'Signature PDF is required.')
     .refine((files) => files?.[0]?.type === 'application/pdf', 'Only PDF files are allowed.')
-    .refine((files) => files?.[0]?.name.includes(z.string().parse(files?.[0]?.name.split('_')[0])), "Filename must contain NI PPPK."),
+    .refine((files) => files?.[0]?.name.includes(z.string().parse(files?.[0]?.name.split('_')[0] || '')), "Filename must contain NI PPPK."),
 });
 
 export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveDialogProps) {
   const [isLoading, setIsLoading] = useState(false);
+  const [templates, setTemplates] = useState<ContractTemplate[]>([]);
   const { toast } = useToast();
 
   const form = useForm<z.infer<typeof archiveSchema>>({
@@ -50,6 +54,19 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
   const startDate = form.watch('startDate');
   const { endDate } = useContractCalculator(startDate, employee?.contractType || 'PENUH_WAKTU');
 
+  useEffect(() => {
+    if (isOpen && employee) {
+      FirebaseFirestore.getTemplates().then(allTemplates => {
+        const filtered = allTemplates.filter(t => t.type === employee.contractType);
+        setTemplates(filtered);
+      });
+    } else {
+      // Reset form and templates when dialog closes
+      form.reset();
+      setTemplates([]);
+    }
+  }, [isOpen, employee, form]);
+
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files) {
       form.setValue('signatureFile', e.target.files);
@@ -57,29 +74,35 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
   };
 
   const onSubmit = async (data: z.infer<typeof archiveSchema>) => {
-    if (!employee) return;
+    if (!employee || !endDate) return;
     setIsLoading(true);
 
     try {
+      // 1. Get the selected template data
+      const selectedTemplate = await FirebaseFirestore.getTemplateById(data.templateId);
+      if (!selectedTemplate) {
+        throw new Error('Selected template not found.');
+      }
+
       const signatureFile = data.signatureFile[0];
       const parsedNiPppk = signatureFile.name.split('_')[0];
       if (parsedNiPppk !== employee.niPppk) {
         throw new Error("NI PPPK in filename does not match the selected employee.");
       }
-
-      // 1. Generate the digital part of the contract
-      const digitalPdfBytes = await generateContractPdf(employee, data.startDate, endDate!);
       
-      // 2. Load the uploaded signature PDF
+      // 2. Generate the digital part of the contract using the dynamic template
+      const digitalPdfBytes = await generateContractPdf(employee, data.startDate, endDate, selectedTemplate);
+      
+      // 3. Load the uploaded signature PDF
       const signaturePdfBytes = await signatureFile.arrayBuffer();
 
-      // 3. Merge the two PDFs
+      // 4. Merge the two PDFs
       const mergedPdfBytes = await mergePdfWithSignature(digitalPdfBytes, new Uint8Array(signaturePdfBytes));
       
-      // 4. Convert to data URI for the AI flow
+      // 5. Convert to data URI for the AI flow
       const pdfDataUri = `data:application/pdf;base64,${Buffer.from(mergedPdfBytes).toString('base64')}`;
       
-      // 5. Call the AI flow to validate and archive
+      // 6. Call the AI flow to validate and archive
       const result = await archiveAndValidateContract({
         niPppk: employee.niPppk,
         pdfDataUri: pdfDataUri,
@@ -121,6 +144,31 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
+            <FormField
+              control={form.control}
+              name="templateId"
+              render={({ field }) => (
+                <FormItem>
+                  <FormLabel>Contract Template</FormLabel>
+                   <Select onValueChange={field.onChange} defaultValue={field.value}>
+                        <FormControl>
+                          <SelectTrigger>
+                            <FileText className="mr-2 h-4 w-4" />
+                            <SelectValue placeholder={`Select a template for ${employee.contractType.replace('_', ' ').toLowerCase()}...`} />
+                          </SelectTrigger>
+                        </FormControl>
+                        <SelectContent>
+                          {templates.length > 0 ? templates.map(t => (
+                            <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
+                          )) : (
+                            <div className="p-4 text-sm text-muted-foreground">No templates found for this contract type.</div>
+                          )}
+                        </SelectContent>
+                      </Select>
+                  <FormMessage />
+                </FormItem>
+              )}
+            />
             <FormField
               control={form.control}
               name="startDate"
@@ -187,7 +235,7 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
               <Button type="button" variant="ghost" onClick={onClose} disabled={isLoading}>
                 Cancel
               </Button>
-              <Button type="submit" disabled={isLoading}>
+              <Button type="submit" disabled={isLoading || !form.formState.isValid}>
                 {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
                 Generate & Archive
               </Button>

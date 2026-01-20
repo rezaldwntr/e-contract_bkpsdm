@@ -8,7 +8,7 @@ import {
   SidebarMenuButton,
   SidebarInset,
 } from "@/components/ui/sidebar";
-import { Bot, Home } from "lucide-react";
+import { Bot, Home, LayoutTemplate } from "lucide-react";
 
 export default function DashboardLayout({
   children,
@@ -29,9 +29,15 @@ export default function DashboardLayout({
         <SidebarContent>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton href="/dashboard" isActive>
+              <SidebarMenuButton href="/dashboard" >
                 <Home />
                 Dashboard
+              </SidebarMenuButton>
+            </SidebarMenuItem>
+             <SidebarMenuItem>
+              <SidebarMenuButton href="/dashboard/templates">
+                <LayoutTemplate />
+                Templates
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>
