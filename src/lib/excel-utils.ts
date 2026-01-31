@@ -1,41 +1,51 @@
+// src/lib/excel-utils.ts
+
 import * as XLSX from 'xlsx';
 import { Employee, ContractType } from './types';
 import { format } from 'date-fns';
 
-// Maps Excel headers to Employee interface keys. CRITICAL for data ingestion.
+// MAPPING BARU (Sesuai Data Terbaru Anda)
 const columnMapping: { [key: string]: keyof Employee } = {
-  'Nomor Kontrak P3K': 'contractNumber',
-  'NIK': 'nik',
+  'Jenis Formasi': 'formationType',
+  'Tahun Formasi': 'formationYear',
   'No Peserta': 'participantId',
+  'NIP': 'niPppk',
   'Nama': 'fullName',
+  'Gelar Depan': 'frontTitle',
+  'Gelar Belakang': 'backTitle',
   'Tempat Lahir': 'birthPlace',
   'Tanggal Lahir': 'birthDate',
-  'Jenis Kelamin': 'gender',
-  'NI P3K': 'niPppk',
-  'Alamat': 'address',
-  'Jabatan': 'position',
-  'Unit Kerja': 'unitName',
-  'Pendidikan': 'education',
-  'Golongan': 'gradeClass',
-  'Gaji': 'salaryNumeric',
-  'Terbilang': 'salaryWords',
+  'Pendidikan Terakhir': 'education',
   'Tahun Lulus': 'graduationYear',
+  'Jabatan': 'position',
+  'Unit Kerja (SK)': 'workUnitSK',
+  'Unit Kerja (PK)': 'workUnitPK',
+  'TMT Jabatan': 'tmtPosition',
+  'Golongan Ruang': 'gradeClass',
+  'Gaji Pokok': 'salaryNumeric',
+  'Terbilang': 'salaryWords',
+  'Tanggal Kontrak Awal': 'contractStartDate',
+  'Tanggal Kontrak Akhir': 'contractEndDate'
 };
 
-// Helper to convert Excel serial date to JS Date
-const excelDateToJSDate = (serial: number) => {
-  const utc_days = Math.floor(serial - 25569);
-  const utc_value = utc_days * 86400;
-  const date_info = new Date(utc_value * 1000);
-  const fractional_day = serial - Math.floor(serial) + 0.0000001;
-  let total_seconds = Math.floor(86400 * fractional_day);
-  const seconds = total_seconds % 60;
-  total_seconds -= seconds;
-  const hours = Math.floor(total_seconds / (60 * 60));
-  const minutes = Math.floor(total_seconds / 60) % 60;
-  return new Date(date_info.getFullYear(), date_info.getMonth(), date_info.getDate(), hours, minutes, seconds);
+// Helper: Format Tanggal Excel ke YYYY-MM-DD
+const parseDate = (value: any): string => {
+  if (!value) return '';
+  try {
+    if (typeof value === 'number') {
+      // Excel Serial Date
+      const date = new Date(Math.round((value - 25569) * 86400 * 1000));
+      return format(date, 'yyyy-MM-dd');
+    } else {
+      // String Date (Asumsi format text sudah benar atau perlu diparse)
+      const date = new Date(value);
+      if (isNaN(date.getTime())) return String(value); // Kembalikan mentah jika gagal parse
+      return format(date, 'yyyy-MM-dd');
+    }
+  } catch (e) {
+    return String(value);
+  }
 };
-
 
 export const parseExcelFile = (file: File): Promise<Omit<Employee, 'status'>[]> => {
   return new Promise((resolve, reject) => {
@@ -46,78 +56,93 @@ export const parseExcelFile = (file: File): Promise<Omit<Employee, 'status'>[]> 
         const workbook = XLSX.read(data, { type: 'array' });
         const sheetName = workbook.SheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
+        
+        // Baca data (Header di baris 1)
         const json: any[] = XLSX.utils.sheet_to_json(worksheet, { raw: false, header: 1 });
 
-        if (json.length < 2) {
-          throw new Error('Excel file is empty or has no data rows.');
-        }
+        if (json.length < 2) throw new Error('File Excel kosong atau header salah.');
 
-        const header: string[] = json[0];
+        const header: string[] = json[0]; // Baris pertama adalah Header
         const rows = json.slice(1);
 
         const employees = rows.map((row): Omit<Employee, 'status'> => {
-          const employeeData: Partial<Employee> = {};
+          const emp: any = {};
           
           header.forEach((colName, index) => {
-            const key = columnMapping[colName.trim()];
+            const key = columnMapping[colName.trim()]; // Trim spasi header jaga-jaga
             if (key) {
-              (employeeData as any)[key] = row[index];
+              emp[key] = row[index];
             }
           });
 
-          // Data transformation and validation
-          if (!employeeData.niPppk) {
-            throw new Error(`Row missing required field 'NI P3K'. Data: ${JSON.stringify(row)}`);
+          // --- VALIDASI & FORMATTING ---
+          
+          if (!emp.niPppk) {
+            // Skip baris kosong jika NIP tidak ada
+            return null;
           }
 
-          const contractType: ContractType = (employeeData.participantId || '').toString().toUpperCase().startsWith('PW') 
-            ? 'PARUH_WAKTU' 
-            : 'PENUH_WAKTU';
+          // 1. Deteksi Tipe Kontrak (Masih pakai logika PW di No Peserta)
+          const isPW = String(emp.participantId || '').toUpperCase().startsWith('PW');
+          
+          // 2. Format Tanggal Penting
+          const formattedBirthDate = parseDate(emp.birthDate);
+          const formattedStartDate = parseDate(emp.contractStartDate);
+          const formattedEndDate = parseDate(emp.contractEndDate);
+          const formattedTmtJabatan = parseDate(emp.tmtPosition);
 
-          // Handle date conversion carefully
-          let birthDateStr: string;
-          if (typeof employeeData.birthDate === 'number') {
-            birthDateStr = format(excelDateToJSDate(employeeData.birthDate), 'yyyy-MM-dd');
-          } else if (typeof employeeData.birthDate === 'string') {
-            // Attempt to parse various string formats, assuming 'dd/mm/yyyy' or 'mm/dd/yyyy' etc.
-            // For robustness, this part may need a more sophisticated date parsing library
-            birthDateStr = format(new Date(employeeData.birthDate), 'yyyy-MM-dd');
+          // 3. Bersihkan Nilai String (Hapus spasi berlebih)
+          const cleanString = (val: any) => String(val || '').trim();
+          
+          // 4. Perbaiki Format Gaji (Hapus "Rp" atau titik jika ada, ambil angkanya saja)
+          let cleanSalary = 0;
+          if (typeof emp.salaryNumeric === 'string') {
+             cleanSalary = Number(emp.salaryNumeric.replace(/[^0-9]/g, ''));
           } else {
-            birthDateStr = format(new Date(), 'yyyy-MM-dd'); // Fallback
+             cleanSalary = Number(emp.salaryNumeric || 0);
           }
-
 
           return {
-            contractNumber: String(employeeData.contractNumber || ''),
-            nik: String(employeeData.nik || ''),
-            participantId: String(employeeData.participantId || ''),
-            fullName: String(employeeData.fullName || ''),
-            birthPlace: String(employeeData.birthPlace || ''),
-            birthDate: birthDateStr,
-            gender: employeeData.gender === 'L' ? 'LAKI-LAKI' : 'PEREMPUAN',
-            niPppk: String(employeeData.niPppk),
-            address: String(employeeData.address || ''),
-            position: String(employeeData.position || ''),
-            unitName: String(employeeData.unitName || ''),
-            education: String(employeeData.education || ''),
-            gradeClass: String(employeeData.gradeClass || ''),
-            salaryNumeric: Number(employeeData.salaryNumeric || 0),
-            salaryWords: String(employeeData.salaryWords || ''),
-            graduationYear: Number(employeeData.graduationYear || 0),
-            contractType: contractType,
+            niPppk: cleanString(emp.niPppk),
+            participantId: cleanString(emp.participantId),
+            
+            fullName: cleanString(emp.fullName),
+            frontTitle: cleanString(emp.frontTitle).replace(/^(-|0)$/, ''), // Hapus tanda strip/- jika gelar kosong
+            backTitle: cleanString(emp.backTitle).replace(/^(-|0)$/, ''),
+            
+            birthPlace: cleanString(emp.birthPlace),
+            birthDate: formattedBirthDate,
+            
+            formationType: cleanString(emp.formationType),
+            formationYear: cleanString(emp.formationYear),
+            position: cleanString(emp.position),
+            gradeClass: cleanString(emp.gradeClass),
+            tmtPosition: formattedTmtJabatan,
+            
+            workUnitSK: cleanString(emp.workUnitSK),
+            workUnitPK: cleanString(emp.workUnitPK),
+            
+            education: cleanString(emp.education),
+            graduationYear: cleanString(emp.graduationYear),
+            
+            salaryNumeric: cleanSalary,
+            salaryWords: cleanString(emp.salaryWords),
+            
+            contractStartDate: formattedStartDate,
+            contractEndDate: formattedEndDate,
+            
+            contractType: isPW ? 'PARUH_WAKTU' : 'PENUH_WAKTU',
           };
-        });
+        }).filter(Boolean) as Omit<Employee, 'status'>[]; // Hapus yang null
 
         resolve(employees);
 
       } catch (error) {
-        console.error("Error parsing Excel file:", error);
+        console.error("Error parsing Excel:", error);
         reject(error);
       }
     };
-    reader.onerror = (error) => {
-      reject(error);
-    };
+    reader.onerror = (error) => reject(error);
     reader.readAsArrayBuffer(file);
   });
 };

@@ -1,7 +1,7 @@
-import { FirebaseFirestore } from "@/services/firebase";
 import { TemplateClient } from "./client";
 
-export default async function TemplatesPage() {
-  const templates = await FirebaseFirestore.getTemplates();
-  return <TemplateClient templates={templates} />;
+export default function TemplatesPage() {
+  // Langsung panggil Client Component tanpa data awal
+  // Data akan diambil oleh Client Component nanti
+  return <TemplateClient />;
 }

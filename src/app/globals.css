@@ -86,3 +86,48 @@ body {
     @apply bg-background text-foreground;
   }
 }
+/* ... kode css yang sudah ada biarkan saja ... */
+
+/* === PERBAIKAN PAKSA TAMPILAN KALENDER === */
+
+/* Paksa container tabel menjadi fleksibel */
+.rdp-table {
+  display: block !important;
+  max-width: 100% !important;
+}
+
+/* Paksa Header Hari (Sen, Sel...) menjadi horizontal */
+.rdp-head_row {
+  display: flex !important;
+  width: 100% !important;
+  justify-content: space-between !important;
+}
+
+/* Paksa Baris Tanggal menjadi horizontal */
+.rdp-row {
+  display: flex !important;
+  width: 100% !important;
+  justify-content: space-between !important;
+  margin-top: 0.5rem !important;
+}
+
+/* Atur lebar setiap sel agar pas 7 kolom */
+.rdp-cell, .rdp-head_cell {
+  width: 40px !important; /* Ukuran fixed agar rapi */
+  height: 40px !important;
+  display: flex !important;
+  align-items: center !important;
+  justify-content: center !important;
+}
+
+/* Perbaiki posisi navigasi bulan/tahun saat dropdown aktif */
+.rdp-caption_dropdowns {
+  display: flex !important;
+  gap: 8px !important;
+  align-items: center !important;
+}
+
+/* Sembunyikan label caption lama jika dropdown aktif */
+.rdp-caption_label {
+  display: none !important;
+}

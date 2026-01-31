@@ -9,6 +9,7 @@ import {
   SidebarInset,
 } from "@/components/ui/sidebar";
 import { Bot, Home, LayoutTemplate } from "lucide-react";
+import Link from "next/link"
 
 export default function DashboardLayout({
   children,
@@ -29,15 +30,19 @@ export default function DashboardLayout({
         <SidebarContent>
           <SidebarMenu>
             <SidebarMenuItem>
-              <SidebarMenuButton href="/dashboard" >
-                <Home />
-                Dashboard
+              <SidebarMenuButton asChild> 
+                <Link href="/dashboard" >
+                  <Home />
+                  Dashboard
+                </Link>
               </SidebarMenuButton>
             </SidebarMenuItem>
              <SidebarMenuItem>
-              <SidebarMenuButton href="/dashboard/templates">
-                <LayoutTemplate />
-                Templates
+              <SidebarMenuButton asChild> 
+                <Link href="/dashboard/templates">
+                  <LayoutTemplate />
+                  Templates
+                </Link>
               </SidebarMenuButton>
             </SidebarMenuItem>
           </SidebarMenu>

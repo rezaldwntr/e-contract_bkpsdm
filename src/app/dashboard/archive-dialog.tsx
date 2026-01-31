@@ -6,13 +6,15 @@ import { z } from 'zod';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { format } from 'date-fns';
 import { CalendarIcon, UploadCloud, Loader2, FileText } from 'lucide-react';
-import { archiveAndValidateContract } from '@/ai/flows/archive-and-validate-contract';
 
-import { Employee, ContractTemplate } from '@/lib/types';
+// Import Firebase (Tanpa AI)
+import { getStorage, ref, uploadBytes, getDownloadURL } from "firebase/storage";
+import { doc, updateDoc, getFirestore } from "firebase/firestore";
+
+import { Employee } from '@/lib/types';
 import { cn } from '@/lib/utils';
 import { useContractCalculator } from '@/hooks/use-contract-calculator';
 import { generateContractPdf, mergePdfWithSignature } from '@/lib/pdf-utils';
-import { FirebaseFirestore } from '@/services/firebase';
 
 import { Button } from '@/components/ui/button';
 import { Calendar } from '@/components/ui/calendar';
@@ -20,7 +22,6 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogD
 import { Form, FormControl, FormField, FormItem, FormLabel, FormMessage } from '@/components/ui/form';
 import { Input } from '@/components/ui/input';
 import { Popover, PopoverContent, PopoverTrigger } from '@/components/ui/popover';
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/select';
 import { useToast } from '@/hooks/use-toast';
 
 interface ArchiveDialogProps {
@@ -32,99 +33,102 @@ interface ArchiveDialogProps {
 
 const archiveSchema = z.object({
   startDate: z.date({
-    required_error: 'A start date is required.',
+    required_error: 'Tanggal mulai kontrak wajib diisi.',
   }),
-  templateId: z.string().min(1, 'A contract template is required.'),
   signatureFile: z
     .custom<FileList>()
-    .refine((files) => files?.length === 1, 'Signature PDF is required.')
-    .refine((files) => files?.[0]?.type === 'application/pdf', 'Only PDF files are allowed.')
-    .refine((files) => files?.[0]?.name.includes(z.string().parse(files?.[0]?.name.split('_')[0] || '')), "Filename must contain NI PPPK."),
+    .refine((files) => files?.length === 1, 'File scan PDF wajib diupload.')
+    .refine((files) => files?.[0]?.type === 'application/pdf', 'Hanya file PDF yang diperbolehkan.')
+    // Validasi ukuran max 5MB
+    .refine((files) => files?.[0]?.size <= 5 * 1024 * 1024, 'Ukuran file maksimal 5MB.'), 
 });
 
 export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveDialogProps) {
   const [isLoading, setIsLoading] = useState(false);
-  const [templates, setTemplates] = useState<ContractTemplate[]>([]);
   const { toast } = useToast();
+
+  // 1. SIAPKAN DEFAULT TANGGAL DARI EXCEL
+  // Cek apakah di data employee ada contractStartDate dari Excel?
+  const defaultDate = employee?.contractStartDate ? new Date(employee.contractStartDate) : undefined;
 
   const form = useForm<z.infer<typeof archiveSchema>>({
     resolver: zodResolver(archiveSchema),
+    defaultValues: {
+      startDate: defaultDate, // <--- AUTO FILL DI SINI
+    },
   });
+
+  // Effect untuk update form jika data employee berubah saat dialog dibuka
+  useEffect(() => {
+    if (employee?.contractStartDate) {
+      form.setValue('startDate', new Date(employee.contractStartDate));
+    }
+  }, [employee, form]);
   
   const startDate = form.watch('startDate');
-  const { endDate } = useContractCalculator(startDate, employee?.contractType || 'PENUH_WAKTU');
-
-  useEffect(() => {
-    if (isOpen && employee) {
-      FirebaseFirestore.getTemplates().then(allTemplates => {
-        const filtered = allTemplates.filter(t => t.type === employee.contractType);
-        setTemplates(filtered);
-      });
-    } else {
-      // Reset form and templates when dialog closes
-      form.reset();
-      setTemplates([]);
-    }
-  }, [isOpen, employee, form]);
+  
+  // Ambil tanggal akhir langsung dari data Employee (karena sudah ada di Excel)
+  // Jika tidak ada di Excel, baru pakai calculator sebagai fallback
+  const excelEndDate = employee?.contractEndDate ? new Date(employee.contractEndDate) : null;
+  const { endDate: calculatedEndDate } = useContractCalculator(startDate, employee?.contractType || 'PENUH_WAKTU');
+  
+  // Prioritaskan tanggal akhir dari Excel
+  const finalEndDate = excelEndDate || calculatedEndDate;
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    if (e.target.files) {
+    if (e.target.files && e.target.files.length > 0) {
       form.setValue('signatureFile', e.target.files);
     }
   };
 
   const onSubmit = async (data: z.infer<typeof archiveSchema>) => {
-    if (!employee || !endDate) return;
+    if (!employee) return;
     setIsLoading(true);
 
     try {
-      // 1. Get the selected template data
-      const selectedTemplate = await FirebaseFirestore.getTemplateById(data.templateId);
-      if (!selectedTemplate) {
-        throw new Error('Selected template not found.');
-      }
-
       const signatureFile = data.signatureFile[0];
-      const parsedNiPppk = signatureFile.name.split('_')[0];
-      if (parsedNiPppk !== employee.niPppk) {
-        throw new Error("NI PPPK in filename does not match the selected employee.");
-      }
       
-      // 2. Generate the digital part of the contract using the dynamic template
-      const digitalPdfBytes = await generateContractPdf(employee, data.startDate, endDate, selectedTemplate);
+      // 1. Generate Draft Kontrak Digital
+      // Kirim tanggal yang sudah dipilih/otomatis
+      const digitalPdfBytes = await generateContractPdf(employee, data.startDate);
       
-      // 3. Load the uploaded signature PDF
+      // 2. Load File Scan Tanda Tangan
       const signaturePdfBytes = await signatureFile.arrayBuffer();
 
-      // 4. Merge the two PDFs
+      // 3. Gabungkan (Stitching)
       const mergedPdfBytes = await mergePdfWithSignature(digitalPdfBytes, new Uint8Array(signaturePdfBytes));
       
-      // 5. Convert to data URI for the AI flow
-      const pdfDataUri = `data:application/pdf;base64,${Buffer.from(mergedPdfBytes).toString('base64')}`;
+      // 4. Upload ke Firebase Storage
+      const storage = getStorage();
+      const storageRef = ref(storage, `archives/${employee.niPppk}_FINAL.pdf`);
       
-      // 6. Call the AI flow to validate and archive
-      const result = await archiveAndValidateContract({
-        niPppk: employee.niPppk,
-        pdfDataUri: pdfDataUri,
+      await uploadBytes(storageRef, mergedPdfBytes);
+      const downloadUrl = await getDownloadURL(storageRef);
+      
+      // 5. Update Status di Firestore
+      const db = getFirestore();
+      const employeeRef = doc(db, "employees", employee.niPppk);
+      
+      await updateDoc(employeeRef, {
+        status: "Archived",
+        archiveUrl: downloadUrl,
+        updatedAt: new Date().toISOString()
       });
 
-      if (result.archived) {
-        toast({
-          title: 'Success!',
-          description: `Contract for ${employee.fullName} has been successfully archived.`,
-        });
-        onSuccess();
-        onClose();
-      } else {
-        throw new Error(`Validation Failed: ${result.validationResult}`);
-      }
+      toast({
+        title: 'Arsip Berhasil!',
+        description: `Kontrak ${employee.fullName} berhasil disimpan.`,
+      });
+      
+      onSuccess();
+      onClose();
 
     } catch (error: any) {
-      console.error('Archival process failed:', error);
+      console.error('Proses arsip gagal:', error);
       toast({
         variant: 'destructive',
-        title: 'Archival Failed',
-        description: error.message || 'An unexpected error occurred.',
+        title: 'Gagal',
+        description: error.message || 'Terjadi kesalahan.',
       });
     } finally {
       setIsLoading(false);
@@ -137,44 +141,21 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
     <Dialog open={isOpen} onOpenChange={onClose}>
       <DialogContent className="sm:max-w-[525px]">
         <DialogHeader>
-          <DialogTitle>Generate & Archive Contract</DialogTitle>
+          <DialogTitle>Arsipkan Kontrak</DialogTitle>
           <DialogDescription>
-            For {employee.fullName} ({employee.niPppk})
+            Pegawai: <b>{employee.fullName}</b>
           </DialogDescription>
         </DialogHeader>
         <Form {...form}>
           <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-6">
-            <FormField
-              control={form.control}
-              name="templateId"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>Contract Template</FormLabel>
-                   <Select onValueChange={field.onChange} defaultValue={field.value}>
-                        <FormControl>
-                          <SelectTrigger>
-                            <FileText className="mr-2 h-4 w-4" />
-                            <SelectValue placeholder={`Select a template for ${employee.contractType.replace('_', ' ').toLowerCase()}...`} />
-                          </SelectTrigger>
-                        </FormControl>
-                        <SelectContent>
-                          {templates.length > 0 ? templates.map(t => (
-                            <SelectItem key={t.id} value={t.id}>{t.name}</SelectItem>
-                          )) : (
-                            <div className="p-4 text-sm text-muted-foreground">No templates found for this contract type.</div>
-                          )}
-                        </SelectContent>
-                      </Select>
-                  <FormMessage />
-                </FormItem>
-              )}
-            />
+            
+            {/* Input Tanggal TMT */}
             <FormField
               control={form.control}
               name="startDate"
               render={({ field }) => (
                 <FormItem className="flex flex-col">
-                  <FormLabel>Contract Start Date (TMT)</FormLabel>
+                  <FormLabel>Tanggal Mulai Kontrak (TMT)</FormLabel>
                   <Popover>
                     <PopoverTrigger asChild>
                       <FormControl>
@@ -186,16 +167,16 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
                           )}
                         >
                           <CalendarIcon className="mr-2 h-4 w-4" />
-                          {field.value ? format(field.value, 'PPP') : <span>Pick a date</span>}
+                          {field.value ? format(field.value, 'dd MMMM yyyy') : <span>Pilih tanggal mulai</span>}
                         </Button>
                       </FormControl>
                     </PopoverTrigger>
-                    <PopoverContent className="w-auto p-0" align="start">
+                    {/* Z-INDEX FIX: Tambahkan z-[9999] agar kalender muncul di atas dialog */}
+                    <PopoverContent className="w-auto p-0 z-[9999]" align="start">
                       <Calendar
                         mode="single"
                         selected={field.value}
                         onSelect={field.onChange}
-                        disabled={(date) => date < new Date('1900-01-01')}
                         initialFocus
                       />
                     </PopoverContent>
@@ -204,26 +185,31 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
                 </FormItem>
               )}
             />
-            {endDate && (
-              <div className="text-sm text-muted-foreground">
-                Calculated End Date: <span className="font-medium text-foreground">{format(endDate, 'PPP')}</span>
+            
+            {/* Info Tanggal Akhir */}
+            {finalEndDate && (
+              <div className="text-sm bg-muted p-2 rounded-md border text-muted-foreground">
+                Masa Kontrak Berakhir: <span className="font-semibold text-foreground">{format(finalEndDate, 'dd MMMM yyyy')}</span>
+                {employee.contractEndDate && <span className="ml-2 text-xs text-green-600">(Sesuai Excel)</span>}
               </div>
             )}
+
+            {/* Input File Upload */}
             <FormField
               control={form.control}
               name="signatureFile"
               render={({ field }) => (
                 <FormItem>
-                  <FormLabel>Scanned Signature PDF</FormLabel>
+                  <FormLabel>Upload Scan PDF (TTD Basah)</FormLabel>
                    <FormControl>
-                    <div className="relative">
-                      <UploadCloud className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground" />
+                    <div className="relative group">
+                      <div className="absolute inset-0 bg-primary/5 opacity-0 group-hover:opacity-100 transition-opacity rounded-md" />
+                      <UploadCloud className="absolute left-3 top-1/2 -translate-y-1/2 h-5 w-5 text-muted-foreground group-hover:text-primary transition-colors" />
                       <Input 
                         type="file" 
                         accept="application/pdf"
-                        className="pl-10"
+                        className="pl-10 cursor-pointer"
                         onChange={handleFileChange}
-                        placeholder="Filename format: {NI PPPK}_TTD.pdf"
                       />
                     </div>
                   </FormControl>
@@ -231,13 +217,20 @@ export function ArchiveDialog({ employee, isOpen, onClose, onSuccess }: ArchiveD
                 </FormItem>
               )}
             />
+
             <DialogFooter>
               <Button type="button" variant="ghost" onClick={onClose} disabled={isLoading}>
-                Cancel
+                Batal
               </Button>
-              <Button type="submit" disabled={isLoading || !form.formState.isValid}>
-                {isLoading ? <Loader2 className="mr-2 h-4 w-4 animate-spin" /> : null}
-                Generate & Archive
+              <Button type="submit" disabled={isLoading}>
+                {isLoading ? (
+                  <>
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                    Memproses...
+                  </>
+                ) : (
+                  'Proses & Arsipkan'
+                )}
               </Button>
             </DialogFooter>
           </form>
