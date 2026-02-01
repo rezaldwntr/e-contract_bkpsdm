@@ -10,7 +10,6 @@ import {
   DropdownMenuItem,
   DropdownMenuLabel,
   DropdownMenuTrigger,
-  DropdownMenuSeparator
 } from "@/components/ui/dropdown-menu";
 import {
   Dialog,
@@ -21,11 +20,13 @@ import {
   DialogFooter,
 } from "@/components/ui/dialog";
 import { Employee } from "@/lib/types";
-import { generateContractPdf } from "@/lib/pdf-utils";
 import { format } from "date-fns";
-import { id } from "date-fns/locale";
 
-// --- ActionCell (Logika Download PDF) ---
+// --- PERBAIKAN UTAMA DI SINI ---
+// Ganti import dari PDF ke DOCX Generator
+// Hapus: import { generateContractPdf } from "@/lib/pdf-utils";
+import { generateDocx } from "@/lib/docx-generator"; 
+
 const ActionCell = ({ employee }: { employee: Employee }) => {
   const [isMounted, setIsMounted] = useState(false);
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
@@ -39,13 +40,7 @@ const ActionCell = ({ employee }: { employee: Employee }) => {
 
   useEffect(() => { setIsMounted(true); }, []);
 
-  if (!isMounted) {
-    return (
-      <Button variant="ghost" className="h-8 w-8 p-0" disabled>
-        <MoreHorizontal className="h-4 w-4" />
-      </Button>
-    );
-  }
+  if (!isMounted) return <Button variant="ghost" className="h-8 w-8 p-0" disabled><MoreHorizontal className="h-4 w-4" /></Button>;
 
   const handleOpenDialog = (e: Event) => {
     e.preventDefault();
@@ -57,15 +52,14 @@ const ActionCell = ({ employee }: { employee: Employee }) => {
     if (!dateValue) return;
     try {
       const selectedDate = new Date(dateValue);
-      const pdfBytes = await generateContractPdf(employee, selectedDate);
-      const blob = new Blob([pdfBytes], { type: "application/pdf" });
-      const link = document.createElement("a");
-      link.href = window.URL.createObjectURL(blob);
-      link.download = `Draft_PK_${employee.niPppk}.pdf`;
-      link.click();
+      
+      // PANGGIL GENERATOR DOCX (Bukan PDF lagi)
+      await generateDocx(employee, selectedDate);
+      
       setIsDialogOpen(false);
     } catch (error) {
-      console.error("Gagal generate PDF:", error);
+      console.error("Gagal generate Dokumen:", error);
+      alert("Gagal mendownload. Cek template sudah diupload atau belum.");
     }
   };
 
@@ -81,17 +75,10 @@ const ActionCell = ({ employee }: { employee: Employee }) => {
         <DropdownMenuContent align="end">
           <DropdownMenuLabel>Aksi</DropdownMenuLabel>
           <DropdownMenuItem onSelect={(e: any) => handleOpenDialog(e)}>
-            <FileText className="mr-2 h-4 w-4" />
-            Download Draft PK
+            {/* Ubah Icon & Teks agar user tau ini Word */}
+            <FileText className="mr-2 h-4 w-4 text-blue-600" />
+            Download Draft PK (Word)
           </DropdownMenuItem>
-          {employee.archiveUrl && (
-            <>
-              <DropdownMenuSeparator />
-              <DropdownMenuItem onClick={() => window.open(employee.archiveUrl, '_blank')}>
-                Lihat Arsip Final
-              </DropdownMenuItem>
-            </>
-          )}
         </DropdownMenuContent>
       </DropdownMenu>
 
@@ -103,24 +90,18 @@ const ActionCell = ({ employee }: { employee: Employee }) => {
               Tentukan tanggal penandatanganan Perjanjian Kerja.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex flex-col gap-4 py-4">
-            <div className="relative">
-              <label className="text-sm font-medium mb-1 block text-muted-foreground">
-                Tanggal:
-              </label>
-              <input
-                type="date"
-                className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm ring-offset-background placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2"
-                value={dateValue}
-                onChange={(e) => setDateValue(e.target.value)}
-              />
-            </div>
+          <div className="py-4">
+            <label className="text-sm font-medium mb-1 block text-muted-foreground">Tanggal:</label>
+            <input
+              type="date"
+              className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"
+              value={dateValue}
+              onChange={(e) => setDateValue(e.target.value)}
+            />
           </div>
           <DialogFooter>
             <Button variant="outline" onClick={() => setIsDialogOpen(false)}>Batal</Button>
-            <Button onClick={handleGenerate} disabled={!dateValue}>
-              Download PDF
-            </Button>
+            <Button onClick={handleGenerate} disabled={!dateValue}>Download .DOCX</Button>
           </DialogFooter>
         </DialogContent>
       </Dialog>
@@ -128,47 +109,27 @@ const ActionCell = ({ employee }: { employee: Employee }) => {
   );
 };
 
-// ... (Kode import dan ActionCell biarkan saja seperti sebelumnya) ...
-
-// --- DEFINISI KOLOM FINAL (Dengan Nama Bergelar) ---
 export const columns: ColumnDef<Employee>[] = [
-  // 1. NI PPPK (Tampil)
+  // Definisi kolom SAMA SEPERTI SEBELUMNYA
   { accessorKey: "niPppk", header: "NI PPPK" },
-
-  // 2. Nama Lengkap + Gelar (Tampil)
   { 
-    accessorKey: "fullName", // Key ini tetap dipakai untuk searching/sorting
+    accessorKey: "fullName", 
     header: "Nama Pegawai",
-    // CUSTOM RENDER: Gabungkan Gelar Depan + Nama + Gelar Belakang
     cell: ({ row }) => {
       const emp = row.original;
-      
-      // Logika: Gelar Depan + Spasi + Nama + Koma + Spasi + Gelar Belakang
-      const front = emp.frontTitle ? `${emp.frontTitle}. ` : ""; // Tambah titik spasi jika ada
-      const back = emp.backTitle ? `, ${emp.backTitle}` : "";   // Tambah koma spasi jika ada
-      
-      // Jika gelar depan sudah mengandung titik (misal "Dr."), jangan tambah titik lagi (opsional)
-      // Tapi biasanya format Excel bersih, jadi kita rakit manual:
-      
-      return (
-        <span className="font-medium">
-          {front}{emp.fullName}{back}
-        </span>
-      );
+      const front = emp.frontTitle ? `${emp.frontTitle}. ` : "";
+      const back = emp.backTitle ? `, ${emp.backTitle}` : "";
+      return <span className="font-medium">{front}{emp.fullName}{back}</span>;
     }
   },
-
-  // 3. Unit Kerja (Tampil)
   { accessorKey: "workUnitSK", header: "Unit Kerja" },
-  
-  // 4. Jabatan (Tampil & Filter)
   { 
     accessorKey: "position", 
     header: "Jabatan",
     filterFn: (row, id, value) => value.includes(row.getValue(id)),
   },
-
-  // --- KOLOM TERSEMBUNYI (HIDDEN) TAPI FILTER TETAP JALAN ---
+  
+  // Kolom Hidden
   { accessorKey: "participantId", header: "No. Peserta" },
   { 
     accessorKey: "contractType", 
@@ -180,7 +141,6 @@ export const columns: ColumnDef<Employee>[] = [
     header: "Jenis Formasi",
     filterFn: (row, id, value) => value.includes(row.getValue(id)),
   },
-  // -----------------------------------------------------------
 
   {
     id: "actions",

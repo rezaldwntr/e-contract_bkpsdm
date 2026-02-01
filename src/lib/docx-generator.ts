@@ -4,97 +4,135 @@ import { saveAs } from "file-saver";
 import { Employee } from "./types";
 import { format } from "date-fns";
 import { id } from "date-fns/locale";
-import { FirebaseStorage } from "@/services/firebase"; // Import Service Firebase
+import { FirebaseStorage } from "@/services/firebase";
 
-// ... (Fungsi terbilang biarkan saja) ...
-const terbilang = (angka: number): string => { 
-    // ... kode terbilang ...
-    const bil = ["", "Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh", "Delapan", "Sembilan", "Sepuluh", "Sebelas"];
-    if (angka < 12) return bil[angka];
-    if (angka < 20) return terbilang(angka - 10) + " Belas";
-    if (angka < 100) return terbilang(Math.floor(angka / 10)) + " Puluh " + terbilang(angka % 10);
-    if (angka < 200) return "Seratus " + terbilang(angka - 100);
-    if (angka < 1000) return terbilang(Math.floor(angka / 100)) + " Ratus " + terbilang(angka % 100);
-    if (angka < 2000) return "Seribu " + terbilang(angka - 1000);
-    if (angka < 1000000) return terbilang(Math.floor(angka / 1000)) + " Ribu " + terbilang(angka % 1000);
-    return angka.toString();
+// Helper Terbilang untuk TANGGAL (Bukan Gaji, karena Gaji sudah ada di Excel)
+const terbilangAngka = (angka: number): string => {
+  const bil = ["", "Satu", "Dua", "Tiga", "Empat", "Lima", "Enam", "Tujuh", "Delapan", "Sembilan", "Sepuluh", "Sebelas"];
+  if (angka < 12) return bil[angka];
+  if (angka < 20) return terbilangAngka(angka - 10) + " Belas";
+  if (angka < 100) return terbilangAngka(Math.floor(angka / 10)) + " Puluh " + terbilangAngka(angka % 10);
+  if (angka < 200) return "Seratus " + terbilangAngka(angka - 100);
+  if (angka < 1000) return terbilangAngka(Math.floor(angka / 100)) + " Ratus " + terbilangAngka(angka % 100);
+  if (angka < 2000) return "Seribu " + terbilangAngka(angka - 1000);
+  if (angka < 1000000) return terbilangAngka(Math.floor(angka / 1000)) + " Ribu " + terbilangAngka(angka % 1000);
+  return angka.toString();
 };
 
 export const generateDocx = async (employee: Employee, date: Date) => {
   try {
-    // 1. Tentukan Jenis Template Berdasarkan Data Pegawai
-    // Asumsi: Di Excel kolom 'Jenis Kontrak' isinya 'Penuh Waktu' atau 'Paruh Waktu'
+    // 1. Cek Jenis Kontrak (Penuh/Paruh) dari kolom "Jenis Formasi"
     const isParuhWaktu = employee.contractType?.toLowerCase().includes("paruh");
     const templateType = isParuhWaktu ? 'paruh' : 'penuh';
 
-    console.log(`Mengambil template untuk: ${employee.contractType} -> Mode: ${templateType}`);
-
-    // 2. Ambil URL dari Firebase Storage
+    // 2. Download Template
     const url = await FirebaseStorage.getTemplateUrl(templateType);
-
     if (!url) {
-      alert("Template belum diupload! Silakan upload dulu di menu Templates.");
+      alert(`Template ${templateType} belum diupload!`);
       return;
     }
-
-    // 3. Download File Template (Fetch)
-    const response = await fetch(url);
-    if (!response.ok) throw new Error("Gagal mendownload template dari server.");
     
+    const response = await fetch(url);
+    if (!response.ok) throw new Error("Gagal download template.");
     const content = await response.arrayBuffer();
     const zip = new PizZip(content);
+    const doc = new Docxtemplater(zip, { paragraphLoop: true, linebreaks: true });
 
-    // 4. Setup Docxtemplater
-    const doc = new Docxtemplater(zip, {
-      paragraphLoop: true,
-      linebreaks: true,
-    });
+    // 3. LOGIKA DETEKSI FORMASI (GURU / KESEHATAN / TEKNIS)
+    // Mengacu pada kolom "Formasi"
+    const formasi = employee.formationType?.toLowerCase() || "";
+    
+    let fraseFungsional = "Fungsional"; 
+    let targetDiskriminasi = "peserta didik";
 
-    // 5. Siapkan Data (Sama seperti sebelumnya)
+    if (formasi.includes("guru")) {
+        // --- KASUS GURU ---
+        fraseFungsional = "Fungsional Guru";
+        targetDiskriminasi = "peserta didik";
+    } else if (formasi.includes("kesehatan")) {
+        // --- KASUS KESEHATAN ---
+        fraseFungsional = "Fungsional Kesehatan";
+        targetDiskriminasi = "pasien";
+    } else {
+        // --- KASUS TEKNIS (Default) ---
+        // Jika mengandung kata "teknis" atau lainnya
+        fraseFungsional = "Fungsional";
+        targetDiskriminasi = "peserta didik";
+    }
+
+    // 4. Siapkan Data Tanggal Tanda Tangan
     const tgl = parseInt(format(date, "d"));
     const thn = parseInt(format(date, "yyyy"));
     const bln = format(date, "MMMM", { locale: id }).toUpperCase();
 
+    // 5. Format Tanggal Lahir & Kontrak (Safety check jika Excel formatnya beda)
+    const safeDate = (dateString: string) => {
+        try {
+            const d = new Date(dateString);
+            return isNaN(d.getTime()) ? dateString : format(d, "dd-MM-yyyy");
+        } catch { return dateString; }
+    };
+    
+    const safeContractDate = (dateString: string) => {
+        try {
+            const d = new Date(dateString);
+            return isNaN(d.getTime()) ? dateString : format(d, "d MMMM yyyy", { locale: id });
+        } catch { return dateString; }
+    };
+
+
+    // 6. RENDER DATA KE WORD
     doc.render({
-      // --- HEADER ---
-      nomor_sk: "1603", // Nanti bisa kita buat dinamis juga
-      
+      // Header & Tanggal
+      nomor_sk: "1603",
       hari_terbilang: format(date, "eeee", { locale: id }).toUpperCase(),
-      tanggal_terbilang: terbilang(tgl).toUpperCase(),
+      tanggal_terbilang: terbilangAngka(tgl).toUpperCase(),
       bulan_terbilang: bln,
-      tahun_terbilang: terbilang(thn).toUpperCase(),
+      tahun_terbilang: terbilangAngka(thn).toUpperCase(),
       
-      // --- DATA DINAMIS LAINNYA ---
+      // Pejabat
       nama_bupati: "H. SAHRUJANI",
       
+      // Pegawai (Identitas Pihak Kedua)
       nama_lengkap: employee.fullName,
       ni_pppk: employee.niPppk,
       tempat_lahir: employee.placeOfBirth,
-      tgl_lahir: format(new Date(employee.dateOfBirth), "dd-MM-yyyy"),
-      pendidikan: "S-1", 
+      tgl_lahir: safeDate(employee.dateOfBirth),
+      
+      // UPDATE 1: Tambahkan Tahun Lulus
+      pendidikan: employee.education,
+      tahun_lulus: employee.graduationYear, // <--- Variabel Baru
+      
       alamat: employee.address,
       
-      tgl_mulai_kontrak: format(new Date(employee.contractStartDate), "d MMMM yyyy", { locale: id }),
-      tgl_selesai_kontrak: format(new Date(employee.contractEndDate), "d MMMM yyyy", { locale: id }),
+      // Detail Kontrak
+      tgl_mulai_kontrak: safeContractDate(employee.contractStartDate),
+      tgl_selesai_kontrak: safeContractDate(employee.contractEndDate),
       jabatan_tugas: employee.position,
-      unit_kerja: employee.workUnitSK,
+      unit_kerja: employee.workUnitPK,
       
-      // Data Gaji (Bisa dibedakan logicnya jika paruh waktu beda gaji)
-      golongan: "VII",            
-      gaji_pokok: "2.858.800,-",  
-      gaji_terbilang: "Dua Juta Delapan Ratus Lima Puluh Delapan Ribu Delapan Ratus Rupiah",
+      // Gaji
+      golongan: employee.payGrade,
+      gaji_pokok: employee.salary,
+      gaji_terbilang: employee.salaryText,
+
+      // Variabel Logika Dinamis
+      frase_fungsional: fraseFungsional,
+      target_diskriminasi: targetDiskriminasi,
+      
+      gelar_depan: employee.frontTitle || "",
+      gelar_belakang: employee.backTitle || "",
     });
 
-    // 6. Generate & Download
     const out = doc.getZip().generate({
       type: "blob",
       mimeType: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     });
 
-    saveAs(out, `Draft_PK_${employee.niPppk}_${templateType}.docx`);
+    saveAs(out, `Draft_PK_${employee.niPppk}.docx`);
     
   } catch (error) {
     console.error("Gagal generate DOCX:", error);
-    alert("Terjadi kesalahan saat memproses dokumen. Cek console untuk detail.");
+    alert("Gagal memproses dokumen. Periksa console.");
   }
 };
